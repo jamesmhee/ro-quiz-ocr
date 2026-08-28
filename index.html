@@ -119,6 +119,27 @@
   #sourceNote.show { display:block; }
   #sourceNote b { color:#00ffaa; }
 
+  /* ---- Quiz set picker (shown before capture starts) ---- */
+  #pickerView {
+    display:none; height:100vh; flex-direction:column; align-items:center; justify-content:center;
+    gap:14px; padding:28px; text-align:center;
+  }
+  #pickerView h2 { font-size:22px; }
+  #pickerView p.sub { color:#889; font-size:13px; max-width:340px; }
+  .quizSetBtn {
+    width:100%; max-width:340px; background:rgba(255,255,255,0.06);
+    border:1px solid rgba(0,255,170,0.45); color:#fff; border-radius:16px;
+    padding:18px 20px; cursor:pointer; text-align:left;
+  }
+  .quizSetBtn:active { transform:scale(0.98); }
+  .quizSetBtn .name { display:block; font-size:17px; font-weight:700; color:#00ffaa; }
+  .quizSetBtn .desc { display:block; font-size:12px; color:#99a; margin-top:4px; }
+  #pickerStatus { font-size:12px; color:#667; min-height:16px; }
+  .toggleLink {
+    background:transparent; border:1px solid #345; color:#9ab;
+    padding:8px 16px; border-radius:20px; font-size:12px; cursor:pointer;
+  }
+
   #permError {
     position:absolute; inset:0; display:none; align-items:center; justify-content:center;
     flex-direction:column; gap:10px; padding:24px; text-align:center; z-index:30; background:#0b0b0f;
@@ -126,6 +147,21 @@
 </style>
 </head>
 <body>
+
+<!-- Step 0: choose which quiz set to answer from -->
+<div id="pickerView">
+  <h2>เลือกประเภทคำถาม</h2>
+  <p class="sub">เลือกชุดคำถามก่อนเริ่มแชร์หน้าจอหรือเปิดกล้อง</p>
+  <button class="quizSetBtn" data-set="noon">
+    <span class="name">เที่ยงและหนึ่งทุ่ม</span>
+    <span class="desc">ชุดคำถามความรู้รอบตัว / ความรู้เรื่องเกม</span>
+  </button>
+  <button class="quizSetBtn" data-set="hoppy">
+    <span class="name">สามทุ่ม</span>
+    <span class="desc">ชุดคำถามจริง-เท็จ (Hoppy)</span>
+  </button>
+  <p id="pickerStatus"></p>
+</div>
 
 <!-- Desktop: show QR to open on mobile -->
 <div id="desktopView">
@@ -136,6 +172,8 @@
   <p class="divider">— หรือ —</p>
   <button id="screenShareBtn">แชร์หน้าจอ / วินโดว์เกม (Live)</button>
   <p>เลือกวินโดว์เกมหรือหน้าจอ แล้วระบบจะสแกนแบบเรียลไทม์ ไม่ต้องใช้กล้องมือถือ</p>
+  <p class="divider">—</p>
+  <button id="desktopQuizSetBtn" class="toggleLink">ชุดคำถาม: — (เปลี่ยน)</button>
 </div>
 
 <!-- Mobile: camera capture UI -->
@@ -153,6 +191,7 @@
 
   <div id="controls">
     <div class="toggleRow">
+      <button id="quizSetBtn">ชุด: —</button>
       <button id="sourceToggle">แหล่งภาพ: กล้อง</button>
       <button id="calibrateBtn">เลือกกรอบคำถาม</button>
       <button id="continuousToggle">โหมดต่อเนื่อง: ปิด</button>

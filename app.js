@@ -34,15 +34,32 @@ const els = {
   calibrateBtn: document.getElementById('calibrateBtn'),
   sourceToggle: document.getElementById('sourceToggle'),
   sourceNote: document.getElementById('sourceNote'),
+  pickerView: document.getElementById('pickerView'),
+  pickerStatus: document.getElementById('pickerStatus'),
+  quizSetBtn: document.getElementById('quizSetBtn'),
+  desktopQuizSetBtn: document.getElementById('desktopQuizSetBtn'),
 };
 
 // ---------- Phase 5/7: Data layer — load questions into memory Map ----------
+// The game runs different quizzes at different times, and a question from one
+// round never appears in another — matching against the wrong set only invents
+// wrong answers, so the set is chosen up front and only that file is loaded.
+const QUIZ_SETS = {
+  noon:  { name: 'เที่ยงและหนึ่งทุ่ม', file: 'questions.json' },
+  hoppy: { name: 'สามทุ่ม',            file: 'questionHoppy.json' },
+};
+const QUIZ_SET_STORAGE_KEY = 'quizSet';
+
+let currentSet = null;
 let questionMap = new Map();   // normalized question -> answer
 let questionList = [];         // [{question, answer}] for Fuse.js
 let fuse = null;
 
-async function loadQuestions() {
-  const res = await fetch('questions.json');
+async function loadQuestions(setKey) {
+  const set = QUIZ_SETS[setKey];
+  if (!set) throw new Error('unknown quiz set: ' + setKey);
+  const res = await fetch(set.file);
+  if (!res.ok) throw new Error(`โหลด ${set.file} ไม่สำเร็จ (${res.status})`);
   const data = await res.json();
   questionList = data.map(item => ({
     question: item.question,
@@ -58,6 +75,15 @@ async function loadQuestions() {
     ignoreLocation: true,
     minMatchCharLength: 4,
   });
+  currentSet = setKey;
+  localStorage.setItem(QUIZ_SET_STORAGE_KEY, setKey);
+  renderQuizSetLabel();
+}
+
+function renderQuizSetLabel() {
+  const name = currentSet ? QUIZ_SETS[currentSet].name : '—';
+  els.quizSetBtn.textContent = `ชุด: ${name}`;
+  els.desktopQuizSetBtn.textContent = `ชุดคำถาม: ${name} (เปลี่ยน)`;
 }
 
 // ---------- Phase 5: normalize text ----------
@@ -90,11 +116,6 @@ function initDeviceView() {
     const url = window.location.href;
     els.desktopUrl.textContent = url;
     els.qrImg.src = 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=' + encodeURIComponent(url);
-    els.screenShareBtn.addEventListener('click', () => {
-      els.desktopView.style.display = 'none';
-      els.mobileView.style.display = 'block';
-      setSource('screen');
-    });
   }
   els.sourceToggle.textContent = 'แหล่งภาพ: กล้อง';
 }
@@ -547,6 +568,11 @@ els.closeResult.addEventListener('click', hideResult);
 els.stopScanBtn.addEventListener('click', stopContinuous);
 els.calibrateBtn.addEventListener('click', startCalibration);
 els.sourceToggle.addEventListener('click', toggleSource);
+els.screenShareBtn.addEventListener('click', () => {
+  els.desktopView.style.display = 'none';
+  els.mobileView.style.display = 'block';
+  setSource('screen');
+});
 els.sourceNote.addEventListener('click', hideNote);
 
 els.roiLayer.addEventListener('mousedown', onDragStart);
@@ -559,8 +585,46 @@ els.roiLayer.addEventListener('touchend', onDragEnd);
 els.video.addEventListener('loadedmetadata', renderSavedRoi);
 window.addEventListener('resize', renderSavedRoi);
 
-// ---------- Boot ----------
-(async function init() {
-  await loadQuestions();
+// ---------- Step 0: quiz set picker ----------
+// Shown before any capture starts; re-openable so a player can switch rounds
+// without reloading (and losing their calibrated question box).
+function showPicker() {
+  if (continuousMode) setContinuous(false);
+  stopStream();
+  hideResult();
+  hideNote();
+  endCalibration();
+  els.mobileView.style.display = 'none';
+  els.desktopView.style.display = 'none';
+  els.permError.style.display = 'none';
+  els.pickerStatus.textContent = '';
+  els.pickerView.style.display = 'flex';
+}
+
+async function chooseQuizSet(setKey) {
+  els.pickerStatus.textContent = `กำลังโหลด ${QUIZ_SETS[setKey].name}...`;
+  try {
+    await loadQuestions(setKey);
+  } catch (err) {
+    els.pickerStatus.textContent = err.message;
+    return;
+  }
+  els.pickerView.style.display = 'none';
   initDeviceView();
+}
+
+document.querySelectorAll('.quizSetBtn').forEach(btn => {
+  btn.addEventListener('click', () => chooseQuizSet(btn.dataset.set));
+});
+els.quizSetBtn.addEventListener('click', showPicker);
+els.desktopQuizSetBtn.addEventListener('click', showPicker);
+
+// ---------- Boot ----------
+(function init() {
+  renderQuizSetLabel();
+  showPicker();
+  const remembered = localStorage.getItem(QUIZ_SET_STORAGE_KEY);
+  if (remembered && QUIZ_SETS[remembered]) {
+    els.pickerStatus.textContent = `เลือกล่าสุด: ${QUIZ_SETS[remembered].name}`;
+  }
 })();
