@@ -32,6 +32,8 @@ const els = {
   roiSaved: document.getElementById('roiSaved'),
   roiHint: document.getElementById('roiHint'),
   calibrateBtn: document.getElementById('calibrateBtn'),
+  sourceToggle: document.getElementById('sourceToggle'),
+  sourceNote: document.getElementById('sourceNote'),
 };
 
 // ---------- Phase 5/7: Data layer — load questions into memory Map ----------
@@ -76,10 +78,13 @@ function isMobileDevice() {
   return coarsePointer || uaMobile;
 }
 
+let onMobile = false;
+
 function initDeviceView() {
-  if (isMobileDevice()) {
+  onMobile = isMobileDevice();
+  if (onMobile) {
     els.mobileView.style.display = 'block';
-    startCamera();
+    setSource('camera');
   } else {
     els.desktopView.style.display = 'flex';
     const url = window.location.href;
@@ -88,9 +93,10 @@ function initDeviceView() {
     els.screenShareBtn.addEventListener('click', () => {
       els.desktopView.style.display = 'none';
       els.mobileView.style.display = 'block';
-      startScreenShare();
+      setSource('screen');
     });
   }
+  els.sourceToggle.textContent = 'แหล่งภาพ: กล้อง';
 }
 
 // ---------- Phase 2: camera capture ----------
@@ -99,51 +105,120 @@ let continuousMode = false;
 let continuousTimer = null;
 const CONTINUOUS_INTERVAL_MS = 1500;
 
-async function startCamera() {
+// Screen sharing is the same getDisplayMedia call on every platform — it is
+// available on Android Chrome and on desktop, but iOS/iPadOS Safari (and every
+// iOS browser, since they all run WebKit) still ships no getDisplayMedia at all.
+function supportsScreenShare() {
+  return !!(navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === 'function');
+}
+
+function isIOS() {
+  // iPadOS reports itself as a Mac, so also treat a touch-capable "Mac" as iOS.
+  return /iPhone|iPod|iPad/i.test(navigator.userAgent) ||
+    (/Macintosh/i.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+}
+
+let currentSource = 'camera';
+
+function stopStream() {
+  if (!stream) return;
+  stream.getTracks().forEach(t => t.stop());
+  stream = null;
+  els.video.srcObject = null;
+}
+
+function showNote(html) {
+  els.sourceNote.innerHTML = html;
+  els.sourceNote.classList.add('show');
+}
+
+function hideNote() {
+  els.sourceNote.classList.remove('show');
+}
+
+function showCaptureError(msg) {
+  els.mobileView.style.display = 'none';
+  els.permError.style.display = 'flex';
+  els.permErrorMsg.textContent = msg;
+}
+
+async function setSource(kind) {
+  if (kind === 'screen' && !supportsScreenShare()) {
+    showNote(isIOS()
+      ? '<b>iPhone / iPad แชร์หน้าจอในเบราว์เซอร์ไม่ได้</b><br>' +
+        'ซาฟารีบน iOS/iPadOS ยังไม่รองรับ getDisplayMedia<br>' +
+        'ทางออก: เปิดหน้านี้บนเครื่องที่สอง แล้วส่องกล้องไปที่จอเกม ' +
+        'หรือใช้แท็บเล็ต Android / คอมพิวเตอร์เพื่อแชร์หน้าจอโดยตรง'
+      : '<b>อุปกรณ์นี้ไม่รองรับการแชร์หน้าจอ</b><br>ใช้โหมดกล้องแทน');
+    return;
+  }
+
+  if (continuousMode) setContinuous(false);
+  hideNote();
+  stopStream();
+  currentSource = kind;
+  els.sourceToggle.textContent = kind === 'screen' ? 'แหล่งภาพ: หน้าจอ' : 'แหล่งภาพ: กล้อง';
+  els.sourceToggle.classList.toggle('active', kind === 'screen');
+
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'environment' },
-      audio: false,
-    });
+    if (kind === 'screen') {
+      // getDisplayMedia opens the browser's own picker (screen/window/tab) —
+      // a consent dialog, not an OS-level permission we can request ourselves.
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: 5 },
+        audio: false,
+      });
+      // "Stop sharing" from the browser's own bar drops us back to the camera
+      // on mobile, or to the QR screen on desktop.
+      stream.getVideoTracks()[0].addEventListener('ended', () => {
+        if (onMobile) {
+          setSource('camera');
+        } else {
+          els.mobileView.style.display = 'none';
+          els.desktopView.style.display = 'flex';
+        }
+      });
+    } else {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment' },
+        audio: false,
+      });
+    }
     els.video.srcObject = stream;
+    roi = loadRoi();
+    renderSavedRoi();
   } catch (err) {
-    els.mobileView.style.display = 'none';
-    els.permError.style.display = 'flex';
-    els.permErrorMsg.textContent = err.message || 'กรุณาอนุญาตการใช้กล้อง';
+    if (kind === 'screen' && onMobile) {
+      // A declined picker on mobile should not strand the user on an error page.
+      showNote('<b>ไม่ได้อนุญาตให้แชร์หน้าจอ</b><br>กลับไปใช้กล้องแล้ว');
+      await setSource('camera');
+      return;
+    }
+    showCaptureError(err.message || (kind === 'screen'
+      ? 'ไม่ได้อนุญาตให้แชร์หน้าจอ'
+      : 'กรุณาอนุญาตการใช้กล้อง'));
   }
 }
 
-// Desktop live capture: getDisplayMedia asks the browser's own screen-share
-// picker (window/tab/screen) — a standard consent dialog, not an OS permission.
-async function startScreenShare() {
-  try {
-    stream = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: 5 },
-      audio: false,
-    });
-    els.video.srcObject = stream;
-    // if user stops sharing via the browser's own "Stop sharing" bar
-    stream.getVideoTracks()[0].addEventListener('ended', () => {
-      els.mobileView.style.display = 'none';
-      els.desktopView.style.display = 'flex';
-    });
-  } catch (err) {
-    els.mobileView.style.display = 'none';
-    els.permError.style.display = 'flex';
-    els.permErrorMsg.textContent = err.message || 'ไม่ได้อนุญาตให้แชร์หน้าจอ';
-  }
+function toggleSource() {
+  setSource(currentSource === 'screen' ? 'camera' : 'screen');
 }
 
 // ---------- Phase 4 (calibration): ROI stored as fractions of the video frame ----------
 // Cropping to just the question line is what makes OCR accurate here — the full
 // game screen carries icons, portraits and decorative text that Tesseract merges
 // into the question and wrecks the match.
-const ROI_KEY = 'quizRoi';
+// Keyed per source: a box drawn around the question on the phone camera does
+// not line up with the same question on a shared screen.
+function roiKey() {
+  return `quizRoi:${currentSource}`;
+}
+
 let roi = loadRoi();
 
 function loadRoi() {
   try {
-    const saved = JSON.parse(localStorage.getItem(ROI_KEY));
+    const saved = JSON.parse(localStorage.getItem(roiKey()));
     if (saved && saved.w > 0.01 && saved.h > 0.005) return saved;
   } catch (_) { /* ignore malformed value */ }
   return null;
@@ -151,7 +226,7 @@ function loadRoi() {
 
 function saveRoi(next) {
   roi = next;
-  localStorage.setItem(ROI_KEY, JSON.stringify(next));
+  localStorage.setItem(roiKey(), JSON.stringify(next));
   renderSavedRoi();
 }
 
@@ -471,6 +546,8 @@ els.continuousToggle.addEventListener('click', toggleContinuous);
 els.closeResult.addEventListener('click', hideResult);
 els.stopScanBtn.addEventListener('click', stopContinuous);
 els.calibrateBtn.addEventListener('click', startCalibration);
+els.sourceToggle.addEventListener('click', toggleSource);
+els.sourceNote.addEventListener('click', hideNote);
 
 els.roiLayer.addEventListener('mousedown', onDragStart);
 els.roiLayer.addEventListener('mousemove', onDragMove);

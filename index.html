@@ -111,6 +111,14 @@
   }
   @keyframes spin { to { transform:rotate(360deg); } }
 
+  #sourceNote {
+    position:fixed; left:16px; right:16px; bottom:150px; z-index:25;
+    background:rgba(10,10,16,0.95); border:1px solid #345; border-radius:12px;
+    padding:12px 14px; font-size:12px; line-height:1.6; color:#cde; display:none;
+  }
+  #sourceNote.show { display:block; }
+  #sourceNote b { color:#00ffaa; }
+
   #permError {
     position:absolute; inset:0; display:none; align-items:center; justify-content:center;
     flex-direction:column; gap:10px; padding:24px; text-align:center; z-index:30; background:#0b0b0f;
@@ -145,6 +153,7 @@
 
   <div id="controls">
     <div class="toggleRow">
+      <button id="sourceToggle">แหล่งภาพ: กล้อง</button>
       <button id="calibrateBtn">เลือกกรอบคำถาม</button>
       <button id="continuousToggle">โหมดต่อเนื่อง: ปิด</button>
     </div>
@@ -163,6 +172,8 @@
     </div>
   </div>
 </div>
+
+<div id="sourceNote"></div>
 
 <div id="permError">
   <h3>ไม่สามารถเปิดกล้องได้</h3>
