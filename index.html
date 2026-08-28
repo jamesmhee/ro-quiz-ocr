@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>ตอบควิซกับจารย์ไก่</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, "Segoe UI", Tahoma, sans-serif; background:#0b0b0f; color:#fff; height:100vh; overflow:hidden; }
+
+  /* ---- Desktop QR view ---- */
+  #desktopView { display:none; height:100vh; align-items:center; justify-content:center; flex-direction:column; gap:16px; padding:24px; text-align:center; }
+  #desktopView img { width:220px; height:220px; background:#fff; border-radius:12px; padding:12px; }
+  #desktopView p { color:#aaa; max-width:360px; }
+  #desktopView .divider { color:#555; font-size:12px; margin:4px 0; }
+  #screenShareBtn {
+    background:#00ffaa; color:#003; border:none; padding:12px 24px;
+    border-radius:24px; font-size:14px; font-weight:600; cursor:pointer;
+  }
+  #screenShareBtn:active { transform:scale(0.96); }
+
+  /* ---- Mobile camera view ---- */
+  #mobileView { display:none; position:relative; height:100vh; }
+  video { width:100%; height:100%; object-fit:cover; display:block; }
+
+  .frameOverlay {
+    position:absolute; inset:0; pointer-events:none;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .frameBox {
+    width:88%; height:55%; border:3px solid rgba(0,255,170,0.9);
+    border-radius:16px; box-shadow:0 0 0 9999px rgba(0,0,0,0.45);
+  }
+
+  #topBar {
+    position:absolute; top:0; left:0; right:0; padding:14px 16px;
+    display:flex; justify-content:space-between; align-items:center;
+    background:linear-gradient(to bottom, rgba(0,0,0,0.6), transparent);
+    z-index:5;
+  }
+  #topBar .status { font-size:13px; color:#aad; }
+  #controls {
+    position:absolute; bottom:0; left:0; right:0; padding:22px 16px 30px;
+    display:flex; flex-direction:column; align-items:center; gap:12px;
+    background:linear-gradient(to top, rgba(0,0,0,0.7), transparent);
+    z-index:5;
+  }
+  #captureBtn {
+    width:70px; height:70px; border-radius:50%; background:#fff;
+    border:4px solid #00ffaa; cursor:pointer;
+  }
+  #captureBtn:active { transform:scale(0.92); }
+  #captureBtn.busy { opacity:0.5; pointer-events:none; }
+
+  .toggleRow { display:flex; gap:10px; align-items:center; }
+  .toggleRow button {
+    background:rgba(255,255,255,0.12); color:#fff; border:1px solid rgba(255,255,255,0.3);
+    padding:6px 14px; border-radius:20px; font-size:12px; cursor:pointer;
+  }
+  .toggleRow button.active { background:#00ffaa; color:#003; border-color:#00ffaa; }
+
+  #resultPanel {
+    position:absolute; left:0; right:0; bottom:0; top:0;
+    background:rgba(5,5,10,0.94); z-index:20;
+    display:none; flex-direction:column; align-items:center; justify-content:center;
+    padding:24px; text-align:center; gap:14px;
+  }
+  #resultPanel.show { display:flex; }
+  #resultAnswer { font-size:30px; font-weight:700; color:#00ffaa; line-height:1.3; }
+  #resultQuestion { font-size:14px; color:#999; max-width:340px; }
+  #resultConfidence { font-size:12px; padding:4px 10px; border-radius:12px; }
+  .conf-high { background:#0a3; color:#fff; }
+  .conf-low { background:#a30; color:#fff; }
+  #closeResult {
+    margin-top:10px; background:transparent; border:1px solid #666; color:#fff;
+    padding:10px 22px; border-radius:24px; cursor:pointer;
+  }
+
+  #rawTextBox {
+    max-width:340px; max-height:120px; overflow-y:auto; font-size:11px;
+    color:#666; background:#111; padding:8px; border-radius:8px; text-align:left;
+  }
+
+  .spinner {
+    width:28px; height:28px; border:3px solid rgba(255,255,255,0.2);
+    border-top-color:#00ffaa; border-radius:50%; animation:spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform:rotate(360deg); } }
+
+  #permError {
+    position:absolute; inset:0; display:none; align-items:center; justify-content:center;
+    flex-direction:column; gap:10px; padding:24px; text-align:center; z-index:30; background:#0b0b0f;
+  }
+</style>
+</head>
+<body>
+
+<!-- Desktop: show QR to open on mobile -->
+<div id="desktopView">
+  <h2>เปิดในมือถือเพื่อใช้กล้อง</h2>
+  <img id="qrImg" alt="QR code">
+  <p id="desktopUrl">—</p>
+  <p>สแกน QR ด้วยกล้องมือถือเพื่อเปิดหน้านี้บนอุปกรณ์ที่มีกล้อง</p>
+  <p class="divider">— หรือ —</p>
+  <button id="screenShareBtn">แชร์หน้าจอ / วินโดว์เกม (Live)</button>
+  <p>เลือกวินโดว์เกมหรือหน้าจอ แล้วระบบจะสแกนแบบเรียลไทม์ ไม่ต้องใช้กล้องมือถือ</p>
+</div>
+
+<!-- Mobile: camera capture UI -->
+<div id="mobileView">
+  <video id="video" autoplay playsinline muted></video>
+  <div class="frameOverlay"><div class="frameBox"></div></div>
+
+  <div id="topBar">
+    <span class="status" id="statusText">พร้อมสแกน</span>
+    <span class="status" id="fpsText"></span>
+  </div>
+
+  <div id="controls">
+    <div class="toggleRow">
+      <button id="continuousToggle">โหมดต่อเนื่อง: ปิด</button>
+    </div>
+    <button id="captureBtn" aria-label="ถ่ายภาพ"></button>
+  </div>
+
+  <div id="resultPanel">
+    <div id="resultSpinner" class="spinner" style="display:none;"></div>
+    <div id="resultAnswer"></div>
+    <div id="resultConfidence"></div>
+    <div id="resultQuestion"></div>
+    <div id="rawTextBox"></div>
+    <button id="closeResult">สแกนต่อ</button>
+  </div>
+</div>
+
+<div id="permError">
+  <h3>ไม่สามารถเปิดกล้องได้</h3>
+  <p id="permErrorMsg" style="color:#999;font-size:13px;max-width:320px;"></p>
+</div>
+
+<canvas id="captureCanvas" style="display:none;"></canvas>
+
+<!-- Tesseract.js (client-side OCR, Thai) -->
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/tesseract.min.js"></script>
+<!-- Fuse.js (fuzzy matching) -->
+<script src="https://cdn.jsdelivr.net/npm/fuse.js@7.0.0/dist/fuse.min.js"></script>
+
+<script src="app.js"></script>
+</body>
+</html>
