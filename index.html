@@ -89,10 +89,16 @@
   #resultConfidence { font-size:12px; padding:4px 10px; border-radius:12px; }
   .conf-high { background:#0a3; color:#fff; }
   .conf-low { background:#a30; color:#fff; }
+  .resultActions { display:flex; gap:10px; margin-top:10px; flex-wrap:wrap; justify-content:center; }
   #closeResult {
-    margin-top:10px; background:transparent; border:1px solid #666; color:#fff;
+    background:transparent; border:1px solid #666; color:#fff;
     padding:10px 22px; border-radius:24px; cursor:pointer;
   }
+  #stopScanBtn {
+    display:none; background:#a30; border:1px solid #d40; color:#fff;
+    padding:10px 22px; border-radius:24px; cursor:pointer; font-weight:600;
+  }
+  #stopScanBtn.show { display:block; }
 
   #rawTextBox {
     max-width:340px; max-height:120px; overflow-y:auto; font-size:11px;
@@ -151,7 +157,10 @@
     <div id="resultConfidence"></div>
     <div id="resultQuestion"></div>
     <div id="rawTextBox"></div>
-    <button id="closeResult">สแกนต่อ</button>
+    <div class="resultActions">
+      <button id="closeResult">สแกนต่อ</button>
+      <button id="stopScanBtn">หยุดสแกนต่อเนื่อง</button>
+    </div>
   </div>
 </div>
 

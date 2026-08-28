@@ -23,6 +23,7 @@ const els = {
   resultQuestion: document.getElementById('resultQuestion'),
   rawTextBox: document.getElementById('rawTextBox'),
   closeResult: document.getElementById('closeResult'),
+  stopScanBtn: document.getElementById('stopScanBtn'),
   permError: document.getElementById('permError'),
   permErrorMsg: document.getElementById('permErrorMsg'),
   frameOverlay: document.getElementById('frameOverlay'),
@@ -198,6 +199,9 @@ function renderSavedRoi() {
 }
 
 function startCalibration() {
+  // Scanning would keep raising the result panel over the drag layer.
+  if (continuousMode) setContinuous(false);
+  hideResult();
   els.roiLayer.classList.add('active');
   els.roiHint.classList.add('show');
   els.frameOverlay.classList.add('hidden');
@@ -439,21 +443,33 @@ async function scanOnce() {
   }
 }
 
-function toggleContinuous() {
-  continuousMode = !continuousMode;
-  els.continuousToggle.textContent = `โหมดต่อเนื่อง: ${continuousMode ? 'เปิด' : 'ปิด'}`;
-  els.continuousToggle.classList.toggle('active', continuousMode);
-  if (continuousMode) {
+function setContinuous(on) {
+  continuousMode = on;
+  els.continuousToggle.textContent = `โหมดต่อเนื่อง: ${on ? 'เปิด' : 'ปิด'}`;
+  els.continuousToggle.classList.toggle('active', on);
+  // The result panel covers the toggle, so it carries its own stop button.
+  els.stopScanBtn.classList.toggle('show', on);
+  clearInterval(continuousTimer);
+  if (on) {
     continuousTimer = setInterval(() => { if (!busy) scanOnce(); }, CONTINUOUS_INTERVAL_MS);
-  } else {
-    clearInterval(continuousTimer);
   }
+}
+
+function toggleContinuous() {
+  setContinuous(!continuousMode);
+}
+
+function stopContinuous() {
+  setContinuous(false);
+  hideResult();
+  els.statusText.textContent = 'หยุดสแกนต่อเนื่องแล้ว';
 }
 
 // ---------- Wire up events ----------
 els.captureBtn.addEventListener('click', scanOnce);
 els.continuousToggle.addEventListener('click', toggleContinuous);
 els.closeResult.addEventListener('click', hideResult);
+els.stopScanBtn.addEventListener('click', stopContinuous);
 els.calibrateBtn.addEventListener('click', startCalibration);
 
 els.roiLayer.addEventListener('mousedown', onDragStart);
