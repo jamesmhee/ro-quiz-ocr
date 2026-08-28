@@ -25,6 +25,12 @@ const els = {
   closeResult: document.getElementById('closeResult'),
   permError: document.getElementById('permError'),
   permErrorMsg: document.getElementById('permErrorMsg'),
+  frameOverlay: document.getElementById('frameOverlay'),
+  roiLayer: document.getElementById('roiLayer'),
+  roiRect: document.getElementById('roiRect'),
+  roiSaved: document.getElementById('roiSaved'),
+  roiHint: document.getElementById('roiHint'),
+  calibrateBtn: document.getElementById('calibrateBtn'),
 };
 
 // ---------- Phase 5/7: Data layer — load questions into memory Map ----------
@@ -38,25 +44,28 @@ async function loadQuestions() {
   questionList = data.map(item => ({
     question: item.question,
     answer: item.answer,
+    norm: normalize(item.question),
   }));
-  questionMap = new Map(questionList.map(q => [normalize(q.question), q.answer]));
+  questionMap = new Map(questionList.map(q => [q.norm, q.answer]));
+  // Match on the normalized form: OCR noise lives in the characters normalize() strips.
   fuse = new Fuse(questionList, {
-    keys: ['question'],
+    keys: ['norm'],
     includeScore: true,
-    threshold: 0.4,
+    threshold: 0.5,
+    ignoreLocation: true,
+    minMatchCharLength: 4,
   });
 }
 
 // ---------- Phase 5: normalize text ----------
+// Tesseract on stylised game fonts emits stray punctuation and drops spaces
+// unpredictably, so strip everything that is not a Thai/Latin/digit character
+// and compare on the bare letter sequence.
 function normalize(str) {
   if (!str) return '';
   return str
-    .replace(/\s+/g, ' ')
-    .trim()
     .toLowerCase()
-    // common OCR confusions (Thai/number look-alikes) — extend as benchmarked
-    .replace(/[Il|]/g, '1')
-    .replace(/O/g, '0');
+    .replace(/[^฀-๿a-z0-9]/g, '');
 }
 
 // ---------- Phase 1: device detection ----------
@@ -124,30 +133,200 @@ async function startScreenShare() {
   }
 }
 
+// ---------- Phase 4 (calibration): ROI stored as fractions of the video frame ----------
+// Cropping to just the question line is what makes OCR accurate here — the full
+// game screen carries icons, portraits and decorative text that Tesseract merges
+// into the question and wrecks the match.
+const ROI_KEY = 'quizRoi';
+let roi = loadRoi();
+
+function loadRoi() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(ROI_KEY));
+    if (saved && saved.w > 0.01 && saved.h > 0.005) return saved;
+  } catch (_) { /* ignore malformed value */ }
+  return null;
+}
+
+function saveRoi(next) {
+  roi = next;
+  localStorage.setItem(ROI_KEY, JSON.stringify(next));
+  renderSavedRoi();
+}
+
+// Video is object-fit:cover, so the displayed box crops the source frame.
+// Convert between the two coordinate spaces to keep the drawn box honest.
+function videoGeometry() {
+  const rect = els.video.getBoundingClientRect();
+  const vw = els.video.videoWidth || 1;
+  const vh = els.video.videoHeight || 1;
+  const scale = Math.max(rect.width / vw, rect.height / vh);
+  const drawnW = vw * scale;
+  const drawnH = vh * scale;
+  return {
+    rect,
+    offsetX: (rect.width - drawnW) / 2,
+    offsetY: (rect.height - drawnH) / 2,
+    drawnW,
+    drawnH,
+  };
+}
+
+function screenRectToRoi(box) {
+  const g = videoGeometry();
+  return {
+    x: (box.left - g.offsetX) / g.drawnW,
+    y: (box.top - g.offsetY) / g.drawnH,
+    w: box.width / g.drawnW,
+    h: box.height / g.drawnH,
+  };
+}
+
+function renderSavedRoi() {
+  if (!roi) {
+    els.roiSaved.style.display = 'none';
+    els.frameOverlay.classList.remove('hidden');
+    return;
+  }
+  const g = videoGeometry();
+  els.frameOverlay.classList.add('hidden');
+  els.roiSaved.style.display = 'block';
+  els.roiSaved.style.left = `${g.offsetX + roi.x * g.drawnW}px`;
+  els.roiSaved.style.top = `${g.offsetY + roi.y * g.drawnH}px`;
+  els.roiSaved.style.width = `${roi.w * g.drawnW}px`;
+  els.roiSaved.style.height = `${roi.h * g.drawnH}px`;
+}
+
+function startCalibration() {
+  els.roiLayer.classList.add('active');
+  els.roiHint.classList.add('show');
+  els.frameOverlay.classList.add('hidden');
+  els.roiSaved.style.display = 'none';
+}
+
+function endCalibration() {
+  els.roiLayer.classList.remove('active');
+  els.roiHint.classList.remove('show');
+  els.roiRect.style.display = 'none';
+}
+
+let dragStart = null;
+function onDragStart(e) {
+  const p = pointerPos(e);
+  dragStart = p;
+  els.roiRect.style.display = 'block';
+  els.roiRect.style.left = `${p.x}px`;
+  els.roiRect.style.top = `${p.y}px`;
+  els.roiRect.style.width = '0px';
+  els.roiRect.style.height = '0px';
+  e.preventDefault();
+}
+
+function onDragMove(e) {
+  if (!dragStart) return;
+  const p = pointerPos(e);
+  els.roiRect.style.left = `${Math.min(dragStart.x, p.x)}px`;
+  els.roiRect.style.top = `${Math.min(dragStart.y, p.y)}px`;
+  els.roiRect.style.width = `${Math.abs(p.x - dragStart.x)}px`;
+  els.roiRect.style.height = `${Math.abs(p.y - dragStart.y)}px`;
+  e.preventDefault();
+}
+
+function onDragEnd(e) {
+  if (!dragStart) return;
+  const p = pointerPos(e);
+  const box = {
+    left: Math.min(dragStart.x, p.x),
+    top: Math.min(dragStart.y, p.y),
+    width: Math.abs(p.x - dragStart.x),
+    height: Math.abs(p.y - dragStart.y),
+  };
+  dragStart = null;
+  endCalibration();
+  if (box.width < 20 || box.height < 10) {
+    els.frameOverlay.classList.remove('hidden');
+    return;
+  }
+  saveRoi(screenRectToRoi(box));
+  els.statusText.textContent = 'บันทึกกรอบคำถามแล้ว';
+}
+
+function pointerPos(e) {
+  const rect = els.roiLayer.getBoundingClientRect();
+  const touch = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]);
+  const src = touch || e;
+  return { x: src.clientX - rect.left, y: src.clientY - rect.top };
+}
+
+// ---------- Phase 2/3: capture the ROI and prepare it for OCR ----------
+const OCR_TARGET_HEIGHT = 220; // upscale small text so Tesseract sees real glyphs
+
 function captureFrame() {
   const video = els.video;
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+
+  const src = roi
+    ? {
+        x: Math.max(0, Math.round(roi.x * vw)),
+        y: Math.max(0, Math.round(roi.y * vh)),
+        w: Math.min(vw, Math.round(roi.w * vw)),
+        h: Math.min(vh, Math.round(roi.h * vh)),
+      }
+    : { x: 0, y: 0, w: vw, h: vh };
+
+  const scale = roi ? Math.max(1, OCR_TARGET_HEIGHT / src.h) : 1;
   const canvas = els.canvas;
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
+  canvas.width = Math.round(src.w * scale);
+  canvas.height = Math.round(src.h * scale);
+
   const ctx = canvas.getContext('2d');
-  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(video, src.x, src.y, src.w, src.h, 0, 0, canvas.width, canvas.height);
   return canvas;
 }
 
-// ---------- Phase 3: preprocess (grayscale + contrast) ----------
+// ---------- Phase 3: preprocess (grayscale -> Otsu binarize) ----------
 function preprocess(canvas) {
   const ctx = canvas.getContext('2d');
   const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const d = imgData.data;
-  const contrastFactor = 1.35; // simple contrast boost
-  for (let i = 0; i < d.length; i += 4) {
-    const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-    const adjusted = (gray - 128) * contrastFactor + 128;
-    const clamped = Math.max(0, Math.min(255, adjusted));
-    d[i] = d[i + 1] = d[i + 2] = clamped;
+
+  const gray = new Uint8Array(d.length / 4);
+  const histogram = new Array(256).fill(0);
+  for (let i = 0, g = 0; i < d.length; i += 4, g++) {
+    const v = Math.round(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]);
+    gray[g] = v;
+    histogram[v]++;
+  }
+
+  const threshold = otsuThreshold(histogram, gray.length);
+  for (let i = 0, g = 0; i < d.length; i += 4, g++) {
+    const v = gray[g] > threshold ? 255 : 0;
+    d[i] = d[i + 1] = d[i + 2] = v;
   }
   ctx.putImageData(imgData, 0, 0);
   return canvas;
+}
+
+function otsuThreshold(histogram, total) {
+  let sum = 0;
+  for (let t = 0; t < 256; t++) sum += t * histogram[t];
+
+  let sumB = 0, wB = 0, best = 0, threshold = 128;
+  for (let t = 0; t < 256; t++) {
+    wB += histogram[t];
+    if (wB === 0) continue;
+    const wF = total - wB;
+    if (wF === 0) break;
+    sumB += t * histogram[t];
+    const mB = sumB / wB;
+    const mF = (sum - sumB) / wF;
+    const variance = wB * wF * (mB - mF) * (mB - mF);
+    if (variance > best) { best = variance; threshold = t; }
+  }
+  return threshold;
 }
 
 // ---------- Phase 3: OCR pipeline (Tesseract.js, client-side) ----------
@@ -155,6 +334,11 @@ let ocrWorker = null;
 async function getOcrWorker() {
   if (ocrWorker) return ocrWorker;
   ocrWorker = await Tesseract.createWorker('tha+eng');
+  await ocrWorker.setParameters({
+    // ROI is a single question line, so treat it as one block of text
+    tessedit_pageseg_mode: '6',
+    preserve_interword_spaces: '1',
+  });
   return ocrWorker;
 }
 
@@ -164,30 +348,22 @@ async function runOcr(canvas) {
   return data; // { text, lines: [...], words: [...] }
 }
 
-// ---------- Phase 4: split question vs options (heuristic) ----------
-function splitQuestionAndOptions(ocrData) {
+// ---------- Phase 4: pick the question text out of the OCR result ----------
+function extractQuestion(ocrData) {
   const lines = (ocrData.lines || [])
     .map(l => l.text.trim())
     .filter(Boolean);
 
-  if (lines.length === 0) {
-    return { question: ocrData.text.trim(), options: [] };
-  }
+  if (lines.length === 0) return ocrData.text.trim();
 
-  // Heuristic: line ending with '?' or the longest line near top → question
-  let questionIdx = lines.findIndex(l => l.endsWith('?') || l.endsWith('๏') || l.includes('?'));
-  if (questionIdx === -1) {
-    // fallback: longest line in the first half of the block = question
-    const firstHalf = lines.slice(0, Math.ceil(lines.length / 2));
-    let longest = '';
-    firstHalf.forEach(l => { if (l.length > longest.length) longest = l; });
-    questionIdx = lines.indexOf(longest);
-  }
+  // Inside a calibrated ROI every line belongs to the question, so join them.
+  if (roi) return lines.join(' ');
 
-  const question = lines[questionIdx] || lines[0];
-  const options = lines.filter((_, i) => i !== questionIdx);
-
-  return { question, options };
+  // Uncalibrated fallback: line with '?' wins, else the longest line up top.
+  const withMark = lines.find(l => l.includes('?'));
+  if (withMark) return withMark;
+  return lines.slice(0, Math.ceil(lines.length / 2))
+    .reduce((a, b) => (b.length > a.length ? b : a), '');
 }
 
 // ---------- Phase 5: matching logic ----------
@@ -200,10 +376,10 @@ function matchAnswer(question) {
   }
 
   // 2) fuzzy match via Fuse.js
-  const results = fuse.search(question);
+  const results = fuse.search(norm);
   if (results.length > 0) {
     const best = results[0];
-    const confidence = best.score <= 0.25 ? 'high' : 'low';
+    const confidence = best.score <= 0.35 ? 'high' : 'low';
     return { answer: best.item.answer, confidence, matchedQuestion: best.item.question };
   }
 
@@ -250,7 +426,7 @@ async function scanOnce() {
     const canvas = captureFrame();
     preprocess(canvas);
     const ocrData = await runOcr(canvas);
-    const { question } = splitQuestionAndOptions(ocrData);
+    const question = extractQuestion(ocrData);
     const { answer, confidence, matchedQuestion } = matchAnswer(question);
     showResult({ answer, confidence, matchedQuestion, rawText: ocrData.text.trim() });
   } catch (err) {
@@ -278,6 +454,17 @@ function toggleContinuous() {
 els.captureBtn.addEventListener('click', scanOnce);
 els.continuousToggle.addEventListener('click', toggleContinuous);
 els.closeResult.addEventListener('click', hideResult);
+els.calibrateBtn.addEventListener('click', startCalibration);
+
+els.roiLayer.addEventListener('mousedown', onDragStart);
+els.roiLayer.addEventListener('mousemove', onDragMove);
+els.roiLayer.addEventListener('mouseup', onDragEnd);
+els.roiLayer.addEventListener('touchstart', onDragStart, { passive: false });
+els.roiLayer.addEventListener('touchmove', onDragMove, { passive: false });
+els.roiLayer.addEventListener('touchend', onDragEnd);
+
+els.video.addEventListener('loadedmetadata', renderSavedRoi);
+window.addEventListener('resize', renderSavedRoi);
 
 // ---------- Boot ----------
 (async function init() {

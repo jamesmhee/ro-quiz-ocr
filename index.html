@@ -31,6 +31,24 @@
     width:88%; height:55%; border:3px solid rgba(0,255,170,0.9);
     border-radius:16px; box-shadow:0 0 0 9999px rgba(0,0,0,0.45);
   }
+  .frameOverlay.hidden { display:none; }
+
+  /* ---- ROI calibration (drag to select question area) ---- */
+  #roiLayer { position:absolute; inset:0; z-index:8; display:none; cursor:crosshair; }
+  #roiLayer.active { display:block; background:rgba(0,0,0,0.35); }
+  #roiRect {
+    position:absolute; border:2px solid #00ffaa; background:rgba(0,255,170,0.12);
+    display:none; pointer-events:none;
+  }
+  #roiSaved {
+    position:absolute; border:2px dashed rgba(0,255,170,0.85);
+    display:none; pointer-events:none; z-index:6;
+  }
+  #roiHint {
+    position:absolute; top:52px; left:0; right:0; text-align:center;
+    font-size:13px; color:#00ffaa; z-index:9; pointer-events:none; display:none;
+  }
+  #roiHint.show { display:block; }
 
   #topBar {
     position:absolute; top:0; left:0; right:0; padding:14px 16px;
@@ -109,7 +127,10 @@
 <!-- Mobile: camera capture UI -->
 <div id="mobileView">
   <video id="video" autoplay playsinline muted></video>
-  <div class="frameOverlay"><div class="frameBox"></div></div>
+  <div class="frameOverlay" id="frameOverlay"><div class="frameBox"></div></div>
+  <div id="roiSaved"></div>
+  <div id="roiLayer"><div id="roiRect"></div></div>
+  <div id="roiHint">ลากกรอบครอบ “เฉพาะบรรทัดคำถาม” แล้วปล่อย</div>
 
   <div id="topBar">
     <span class="status" id="statusText">พร้อมสแกน</span>
@@ -118,6 +139,7 @@
 
   <div id="controls">
     <div class="toggleRow">
+      <button id="calibrateBtn">เลือกกรอบคำถาม</button>
       <button id="continuousToggle">โหมดต่อเนื่อง: ปิด</button>
     </div>
     <button id="captureBtn" aria-label="ถ่ายภาพ"></button>
