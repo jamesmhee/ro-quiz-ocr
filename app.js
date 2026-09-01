@@ -47,6 +47,7 @@ const els = {
 const QUIZ_SETS = {
   noon:  { name: 'เที่ยงและหนึ่งทุ่ม', file: 'questions.json' },
   hoppy: { name: 'สามทุ่ม',            file: 'questionHoppy.json' },
+  guild: { name: 'งานเลี้ยงกิลด์',       file: 'questionGuild.json' },
 };
 const QUIZ_SET_STORAGE_KEY = 'quizSet';
 
@@ -63,7 +64,7 @@ async function loadQuestions(setKey) {
   const data = await res.json();
   questionList = data.map(item => ({
     question: item.question,
-    answer: item.answer,
+    answer: pickAnswer(item),
     norm: normalize(item.question),
   }));
   questionMap = new Map(questionList.map(q => [q.norm, q.answer]));
@@ -78,6 +79,15 @@ async function loadQuestions(setKey) {
   currentSet = setKey;
   localStorage.setItem(QUIZ_SET_STORAGE_KEY, setKey);
   renderQuizSetLabel();
+}
+
+// Some sets (guild) store the same answer in several languages instead of one
+// string; the player types Thai, so prefer the Thai variant and fall back to
+// the first listed alternative.
+function pickAnswer(item) {
+  if (typeof item.answer === 'string') return item.answer;
+  const list = Array.isArray(item.answers) ? item.answers : [];
+  return list.find(a => /[\u0E00-\u0E7F]/.test(a)) || list[0] || '';
 }
 
 function renderQuizSetLabel() {
@@ -490,6 +500,9 @@ function matchAnswer(question) {
 function showResult({ answer, confidence, matchedQuestion, rawText }) {
   els.resultSpinner.style.display = 'none';
   els.resultAnswer.textContent = answer || 'ไม่พบคำตอบที่ตรงกัน';
+  // True/false answers get colour-coded so the result reads at a glance.
+  els.resultAnswer.style.color =
+    answer && answer.includes('เท็จ') ? '#ff4d4d' : '';
   els.resultQuestion.textContent = matchedQuestion ? `คำถามที่จับคู่: ${matchedQuestion}` : '';
   els.resultConfidence.textContent = answer
     ? (confidence === 'high' ? 'มั่นใจสูง' : 'ไม่ค่อยมั่นใจ — ลองสแกนใหม่')
