@@ -594,7 +594,13 @@ function matchAnswer(question) {
 // ---------- Phase 6: display result ----------
 function showResult({ answer, confidence, matchedQuestion, rawText }) {
   els.resultSpinner.style.display = 'none';
-  els.resultAnswer.textContent = answer || 'ไม่พบคำตอบที่ตรงกัน';
+  // The true/false round (สามทุ่ม) leaves only seconds to answer, so show a
+  // huge green/red dot that reads at a glance instead of a word.
+  const trueFalse = currentSet === 'hoppy' && (answer === 'จริง' || answer === 'เท็จ');
+  els.resultAnswer.textContent = trueFalse
+    ? (answer === 'จริง' ? '🟢' : '🔴')
+    : (answer || 'ไม่พบคำตอบที่ตรงกัน');
+  els.resultAnswer.style.fontSize = trueFalse ? '100px' : '';
   // True/false answers get colour-coded so the result reads at a glance.
   els.resultAnswer.style.color =
     answer && answer.includes('เท็จ') ? '#ff4d4d' : '';
