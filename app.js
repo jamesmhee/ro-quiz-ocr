@@ -134,7 +134,6 @@ function initDeviceView() {
 let stream = null;
 let continuousMode = false;
 let continuousTimer = null;
-const CONTINUOUS_INTERVAL_MS = 1500;
 
 // Screen sharing is the same getDisplayMedia call on every platform — it is
 // available on Android Chrome and on desktop, but iOS/iPadOS Safari (and every
@@ -196,7 +195,8 @@ async function setSource(kind) {
       // getDisplayMedia opens the browser's own picker (screen/window/tab) —
       // a consent dialog, not an OS-level permission we can request ourselves.
       stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: 5 },
+        // The change watcher can only react as fast as frames arrive.
+        video: { frameRate: 15 },
         audio: false,
       });
       // "Stop sharing" from the browser's own bar drops us back to the camera
@@ -258,6 +258,8 @@ function loadRoi() {
 function saveRoi(next) {
   roi = next;
   localStorage.setItem(roiKey(), JSON.stringify(next));
+  // Remembered thumbnails were taken through the old box and no longer match.
+  clearAnswerCache();
   renderSavedRoi();
 }
 
@@ -371,12 +373,12 @@ function pointerPos(e) {
 // ---------- Phase 2/3: capture the ROI and prepare it for OCR ----------
 const OCR_TARGET_HEIGHT = 220; // upscale small text so Tesseract sees real glyphs
 
-function captureFrame() {
-  const video = els.video;
-  const vw = video.videoWidth;
-  const vh = video.videoHeight;
-
-  const src = roi
+// Source rectangle in video pixels: the calibrated ROI, or the whole frame.
+function roiSource() {
+  const vw = els.video.videoWidth;
+  const vh = els.video.videoHeight;
+  if (!vw || !vh) return null;
+  return roi
     ? {
         x: Math.max(0, Math.round(roi.x * vw)),
         y: Math.max(0, Math.round(roi.y * vh)),
@@ -384,6 +386,12 @@ function captureFrame() {
         h: Math.min(vh, Math.round(roi.h * vh)),
       }
     : { x: 0, y: 0, w: vw, h: vh };
+}
+
+function captureFrame() {
+  const video = els.video;
+  const src = roiSource();
+  if (!src) throw new Error('ยังไม่มีภาพจากกล้อง/หน้าจอ');
 
   const scale = roi ? Math.max(1, OCR_TARGET_HEIGHT / src.h) : 1;
   const canvas = els.canvas;
@@ -397,7 +405,8 @@ function captureFrame() {
   return canvas;
 }
 
-// ---------- Phase 3: preprocess (grayscale -> Otsu binarize) ----------
+// ---------- Phase 3: preprocess (grayscale -> Otsu binarize -> trim) ----------
+// Returns the canvas to OCR: dark text on white, cropped to the text itself.
 function preprocess(canvas) {
   const ctx = canvas.getContext('2d');
   const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
@@ -412,12 +421,59 @@ function preprocess(canvas) {
   }
 
   const threshold = otsuThreshold(histogram, gray.length);
+  // Background covers most of a text box, so the minority side is the ink.
+  // Game text is often light-on-dark; always emit dark-on-light, which is
+  // what Tesseract is trained on.
+  let bright = 0;
+  for (let g = 0; g < gray.length; g++) if (gray[g] > threshold) bright++;
+  const inkIsBright = bright < gray.length / 2;
+
+  const ink = new Uint8Array(gray.length);
   for (let i = 0, g = 0; i < d.length; i += 4, g++) {
-    const v = gray[g] > threshold ? 255 : 0;
+    ink[g] = (gray[g] > threshold) === inkIsBright ? 1 : 0;
+    const v = ink[g] ? 0 : 255;
     d[i] = d[i + 1] = d[i + 2] = v;
   }
   ctx.putImageData(imgData, 0, 0);
-  return canvas;
+  return trimToInk(canvas, ink);
+}
+
+// OCR time scales with pixel count, and a loosely drawn box is mostly empty
+// margin — crop to the rows/columns that actually carry ink.
+const TRIM_PAD = 12;
+const TRIM_MIN_INK = 2; // ink pixels a row/column needs, so lone specks don't stretch the box
+
+function trimToInk(canvas, ink) {
+  const w = canvas.width;
+  const h = canvas.height;
+  const rowInk = new Uint32Array(h);
+  const colInk = new Uint32Array(w);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (ink[y * w + x]) { rowInk[y]++; colInk[x]++; }
+    }
+  }
+
+  let top = 0, bottom = h - 1, left = 0, right = w - 1;
+  while (top < h && rowInk[top] < TRIM_MIN_INK) top++;
+  if (top === h) return canvas; // blank box: nothing to trim to
+  while (bottom > top && rowInk[bottom] < TRIM_MIN_INK) bottom--;
+  while (left < w && colInk[left] < TRIM_MIN_INK) left++;
+  while (right > left && colInk[right] < TRIM_MIN_INK) right--;
+
+  top = Math.max(0, top - TRIM_PAD);
+  left = Math.max(0, left - TRIM_PAD);
+  bottom = Math.min(h - 1, bottom + TRIM_PAD);
+  right = Math.min(w - 1, right + TRIM_PAD);
+  const cw = right - left + 1;
+  const ch = bottom - top + 1;
+  if (cw * ch > 0.9 * w * h) return canvas; // not worth a copy
+
+  const out = document.createElement('canvas');
+  out.width = cw;
+  out.height = ch;
+  out.getContext('2d').drawImage(canvas, left, top, cw, ch, 0, 0, cw, ch);
+  return out;
 }
 
 function otsuThreshold(histogram, total) {
@@ -440,21 +496,60 @@ function otsuThreshold(histogram, total) {
 }
 
 // ---------- Phase 3: OCR pipeline (Tesseract.js, client-side) ----------
-let ocrWorker = null;
-async function getOcrWorker() {
-  if (ocrWorker) return ocrWorker;
-  ocrWorker = await Tesseract.createWorker('tha+eng');
-  await ocrWorker.setParameters({
-    // ROI is a single question line, so treat it as one block of text
-    tessedit_pageseg_mode: '6',
-    preserve_interword_spaces: '1',
-  });
-  return ocrWorker;
+// The default "best" model is the most accurate but the slowest; tessdata_fast
+// is a smaller network that reads a line noticeably quicker. Open the page with
+// ?ocr=best to compare against the slower model.
+const OCR_MODEL = new URLSearchParams(location.search).get('ocr') === 'best' ? 'best' : 'fast';
+const OCR_WORKER_OPTIONS = OCR_MODEL === 'fast'
+  ? {
+      langPath: 'https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main',
+      gzip: false,
+      // tesseract.js caches traineddata by language name only; a separate
+      // cache path stops it reusing a previously downloaded "best" file.
+      cachePath: 'tessdata_fast',
+    }
+  : {};
+
+// Cache the promise, not the worker, so a warm-up and a scan racing each other
+// share one worker instead of loading the language data twice.
+let ocrWorkerPromise = null;
+function getOcrWorker() {
+  if (!ocrWorkerPromise) {
+    ocrWorkerPromise = (async () => {
+      const worker = await Tesseract.createWorker('tha+eng', 1, OCR_WORKER_OPTIONS);
+      await worker.setParameters({
+        // ROI is a single question line, so treat it as one block of text
+        tessedit_pageseg_mode: '6',
+        preserve_interword_spaces: '1',
+      });
+      return worker;
+    })();
+    ocrWorkerPromise.catch(() => { ocrWorkerPromise = null; });
+  }
+  return ocrWorkerPromise;
 }
+
+// Loading the language data and the first recognize() are the slowest calls
+// Tesseract makes; pay for them while the player is still setting up.
+function warmUpOcr() {
+  getOcrWorker()
+    .then(worker => {
+      const c = document.createElement('canvas');
+      c.width = 64; c.height = 32;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, c.width, c.height);
+      return worker.recognize(c);
+    })
+    .catch(() => { /* a real scan will surface the error */ });
+}
+
+// Only text + line layout are used; skipping hOCR/TSV generation saves time per scan.
+const OCR_OUTPUT = { text: true, blocks: true, hocr: false, tsv: false };
 
 async function runOcr(canvas) {
   const worker = await getOcrWorker();
-  const { data } = await worker.recognize(canvas);
+  const { data } = await worker.recognize(canvas, {}, OCR_OUTPUT);
   return data; // { text, lines: [...], words: [...] }
 }
 
@@ -527,29 +622,196 @@ function hideResult() {
 
 // ---------- Orchestration: capture -> preprocess -> OCR -> match -> display ----------
 let busy = false;
-async function scanOnce() {
-  if (busy) return;
+// quiet: continuous-mode scan — keep the current answer on screen while OCR
+// runs and only replace it when a new answer is found, so the player never
+// loses the answer to a spinner or a failed read of a transition frame.
+async function scanOnce({ quiet = false } = {}) {
+  if (busy) return null;
   busy = true;
   els.captureBtn.classList.add('busy');
   els.statusText.textContent = 'กำลังสแกน...';
-  showLoading();
+  if (!quiet) showLoading();
 
   const t0 = performance.now();
+  let result = null;
+  let fromCache = false;
   try {
-    const canvas = captureFrame();
-    preprocess(canvas);
-    const ocrData = await runOcr(canvas);
-    const question = extractQuestion(ocrData);
-    const { answer, confidence, matchedQuestion } = matchAnswer(question);
-    showResult({ answer, confidence, matchedQuestion, rawText: ocrData.text.trim() });
+    // Thumbnail taken from the same frame that gets OCR'd.
+    const cacheSig = sampleRoi(cacheCtx, CACHE_W, CACHE_H);
+    // A manual press always does a fresh OCR, so a wrong remembered answer
+    // can be corrected by tapping the capture button.
+    const hit = quiet && cacheSig ? nearestCacheEntry(cacheSig) : null;
+    if (hit) {
+      fromCache = true;
+      result = { answer: hit.answer, confidence: 'high', matchedQuestion: hit.question };
+      showResult({ ...result, rawText: '(จำได้จากครั้งก่อน — ไม่ต้อง OCR)' });
+    } else {
+      const canvas = preprocess(captureFrame());
+      const ocrData = await runOcr(canvas);
+      const question = extractQuestion(ocrData);
+      result = matchAnswer(question);
+      if (!quiet || result.answer) {
+        showResult({ ...result, rawText: ocrData.text.trim() });
+      }
+      if (cacheSig && result.answer && result.confidence === 'high') {
+        cacheStore(cacheSig, result);
+      }
+    }
   } catch (err) {
-    showResult({ answer: null, confidence: 'low', matchedQuestion: null, rawText: 'เกิดข้อผิดพลาด: ' + err.message });
+    if (!quiet) {
+      showResult({ answer: null, confidence: 'low', matchedQuestion: null, rawText: 'เกิดข้อผิดพลาด: ' + err.message });
+    }
   } finally {
     const elapsed = Math.round(performance.now() - t0);
-    els.statusText.textContent = `พร้อมสแกน (${elapsed}ms)`;
+    const how = fromCache ? 'จำได้' : `${elapsed}ms`;
+    els.statusText.textContent = quiet
+      ? `${result && result.answer ? 'เจอคำถาม' : 'ไม่พบคำถาม'} (${how}) — รอคำถามใหม่`
+      : `พร้อมสแกน (${how})`;
     els.captureBtn.classList.remove('busy');
     busy = false;
   }
+  return result;
+}
+
+// ---------- Continuous mode: watch the ROI, OCR only when the question changes ----------
+// OCR costs ~0.5-1.5s; comparing a tiny grayscale thumbnail of the ROI costs
+// well under 1ms. So sample often, and run OCR only once the box shows
+// something new and has stopped animating. After a confident answer the
+// question is locked and never re-scanned until the box changes again.
+const WATCH_INTERVAL_MS = 100;
+const SIG_W = 64;
+const SIG_H = 16;
+const CHANGE_THRESHOLD = 12; // mean gray-level diff that means "different question"
+const STABLE_THRESHOLD = 5;  // below this between samples = frame has settled
+
+const sigCanvas = document.createElement('canvas');
+sigCanvas.width = SIG_W;
+sigCanvas.height = SIG_H;
+const sigCtx = sigCanvas.getContext('2d', { willReadFrequently: true });
+
+let prevSig = null;    // previous sample, to detect when a transition settles
+let lockedSig = null;  // sample the last OCR ran on
+let lockedHit = false; // whether that OCR produced a confident answer
+
+// Grayscale thumbnail of the ROI at w×h, as one byte per pixel.
+function sampleRoi(ctx, w, h) {
+  const src = roiSource();
+  if (!src) return null;
+  ctx.drawImage(els.video, src.x, src.y, src.w, src.h, 0, 0, w, h);
+  const d = ctx.getImageData(0, 0, w, h).data;
+  const sig = new Uint8Array(w * h);
+  for (let i = 0, g = 0; i < d.length; i += 4, g++) {
+    sig[g] = (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8;
+  }
+  return sig;
+}
+
+function frameSignature() {
+  return sampleRoi(sigCtx, SIG_W, SIG_H);
+}
+
+// ---------- Answer memory: skip OCR for questions seen before ----------
+// Questions are drawn from a fixed bank, so they repeat. A shared screen
+// renders the same question pixel-for-pixel each time, so a sharper thumbnail
+// than the change watcher's identifies it without OCR. Only confident answers
+// are remembered, per quiz set and per source (the box differs between them).
+const CACHE_W = 128;
+const CACHE_H = 20;
+const CACHE_HIT_THRESHOLD = 3; // mean gray diff; a different question lands far above this
+const CACHE_MAX = 200;         // ~3.4KB each in localStorage
+
+const cacheCanvas = document.createElement('canvas');
+cacheCanvas.width = CACHE_W;
+cacheCanvas.height = CACHE_H;
+const cacheCtx = cacheCanvas.getContext('2d', { willReadFrequently: true });
+
+let answerCache = [];
+let answerCacheKey = null;
+
+function currentCacheKey() {
+  return `answerCache:${currentSet}:${currentSource}`;
+}
+
+function bytesToB64(bytes) {
+  return btoa(String.fromCharCode(...bytes));
+}
+
+function b64ToBytes(s) {
+  return Uint8Array.from(atob(s), c => c.charCodeAt(0));
+}
+
+function loadAnswerCache() {
+  const key = currentCacheKey();
+  if (answerCacheKey === key) return answerCache;
+  answerCacheKey = key;
+  try {
+    const raw = JSON.parse(localStorage.getItem(key)) || [];
+    answerCache = raw.map(e => ({ sig: b64ToBytes(e.s), answer: e.a, question: e.q }));
+  } catch (_) {
+    answerCache = [];
+  }
+  return answerCache;
+}
+
+function persistAnswerCache() {
+  try {
+    localStorage.setItem(answerCacheKey, JSON.stringify(
+      answerCache.map(e => ({ s: bytesToB64(e.sig), a: e.answer, q: e.question }))));
+  } catch (_) { /* storage full: keep remembering for this session only */ }
+}
+
+function clearAnswerCache() {
+  Object.keys(QUIZ_SETS).forEach(set => localStorage.removeItem(`answerCache:${set}:${currentSource}`));
+  answerCache = [];
+  answerCacheKey = null;
+}
+
+function nearestCacheEntry(sig) {
+  let best = null;
+  let bestDiff = Infinity;
+  for (const entry of loadAnswerCache()) {
+    const diff = sigDiff(sig, entry.sig);
+    if (diff < bestDiff) { bestDiff = diff; best = entry; }
+  }
+  return bestDiff < CACHE_HIT_THRESHOLD ? best : null;
+}
+
+function cacheStore(sig, { answer, matchedQuestion }) {
+  const existing = nearestCacheEntry(sig);
+  if (existing) {
+    // A fresh OCR of the same question wins over what was remembered.
+    existing.answer = answer;
+    existing.question = matchedQuestion;
+  } else {
+    answerCache.push({ sig, answer, question: matchedQuestion });
+    if (answerCache.length > CACHE_MAX) answerCache.shift();
+  }
+  persistAnswerCache();
+}
+
+function sigDiff(a, b) {
+  if (!a || !b) return 255;
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i]);
+  return sum / a.length;
+}
+
+async function watchTick() {
+  if (!continuousMode || busy) return;
+  const sig = frameSignature();
+  if (!sig) return;
+  const settling = sigDiff(sig, prevSig) > STABLE_THRESHOLD;
+  prevSig = sig;
+  if (settling) return; // mid-animation: OCR would read half-drawn text
+
+  // A confident answer holds until the question clearly changes; a miss is
+  // retried on any visible change (camera moved, text finished fading in).
+  const limit = lockedHit ? CHANGE_THRESHOLD : STABLE_THRESHOLD;
+  if (lockedSig && sigDiff(sig, lockedSig) < limit) return;
+
+  const result = await scanOnce({ quiet: true });
+  lockedSig = sig;
+  lockedHit = !!(result && result.answer && result.confidence === 'high');
 }
 
 function setContinuous(on) {
@@ -559,8 +821,11 @@ function setContinuous(on) {
   // The result panel covers the toggle, so it carries its own stop button.
   els.stopScanBtn.classList.toggle('show', on);
   clearInterval(continuousTimer);
+  prevSig = lockedSig = null;
+  lockedHit = false;
   if (on) {
-    continuousTimer = setInterval(() => { if (!busy) scanOnce(); }, CONTINUOUS_INTERVAL_MS);
+    continuousTimer = setInterval(watchTick, WATCH_INTERVAL_MS);
+    els.statusText.textContent = 'กำลังเฝ้าดูกรอบคำถาม...';
   }
 }
 
@@ -623,6 +888,7 @@ async function chooseQuizSet(setKey) {
     return;
   }
   els.pickerView.style.display = 'none';
+  warmUpOcr();
   initDeviceView();
 }
 
