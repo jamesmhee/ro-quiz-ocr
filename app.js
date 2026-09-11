@@ -681,8 +681,14 @@ async function scanOnce({ quiet = false } = {}) {
 const WATCH_INTERVAL_MS = 100;
 const SIG_W = 64;
 const SIG_H = 16;
-const CHANGE_THRESHOLD = 12; // mean gray-level diff that means "different question"
-const STABLE_THRESHOLD = 5;  // below this between samples = frame has settled
+// Thresholds are the share of thumbnail pixels that changed noticeably. A mean
+// diff can't be used: a new question in the same box changes only the thin
+// text strokes, which averages out to almost nothing against the background.
+const CHANGE_THRESHOLD = 0.004; // this much of the box changed = different question
+const STABLE_THRESHOLD = 0.004; // less than this between samples = frame has settled
+// Safety net: even when nothing seems to change, re-check a locked question
+// this often. Same question = instant answer-memory hit, so it costs ~nothing.
+const RECHECK_MS = 1500;
 
 const sigCanvas = document.createElement('canvas');
 sigCanvas.width = SIG_W;
@@ -692,6 +698,7 @@ const sigCtx = sigCanvas.getContext('2d', { willReadFrequently: true });
 let prevSig = null;    // previous sample, to detect when a transition settles
 let lockedSig = null;  // sample the last OCR ran on
 let lockedHit = false; // whether that OCR produced a confident answer
+let lockedAt = 0;      // when that OCR ran
 
 // Grayscale thumbnail of the ROI at w×h, as one byte per pixel.
 function sampleRoi(ctx, w, h) {
@@ -717,7 +724,7 @@ function frameSignature() {
 // are remembered, per quiz set and per source (the box differs between them).
 const CACHE_W = 128;
 const CACHE_H = 20;
-const CACHE_HIT_THRESHOLD = 3; // mean gray diff; a different question lands far above this
+const CACHE_HIT_THRESHOLD = 0.01; // changed-pixel share; a different question lands far above this
 const CACHE_MAX = 200;         // ~3.4KB each in localStorage
 
 const cacheCanvas = document.createElement('canvas');
@@ -789,11 +796,17 @@ function cacheStore(sig, { answer, matchedQuestion }) {
   persistAnswerCache();
 }
 
+// Share of pixels (0..1) whose gray level moved more than PIXEL_DELTA —
+// big enough to ignore video-compression shimmer, small enough to see text.
+const PIXEL_DELTA = 30;
+
 function sigDiff(a, b) {
-  if (!a || !b) return 255;
-  let sum = 0;
-  for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i]);
-  return sum / a.length;
+  if (!a || !b || a.length !== b.length) return 1;
+  let changed = 0;
+  for (let i = 0; i < a.length; i++) {
+    if (Math.abs(a[i] - b[i]) > PIXEL_DELTA) changed++;
+  }
+  return changed / a.length;
 }
 
 async function watchTick() {
@@ -807,10 +820,12 @@ async function watchTick() {
   // A confident answer holds until the question clearly changes; a miss is
   // retried on any visible change (camera moved, text finished fading in).
   const limit = lockedHit ? CHANGE_THRESHOLD : STABLE_THRESHOLD;
-  if (lockedSig && sigDiff(sig, lockedSig) < limit) return;
+  const due = performance.now() - lockedAt > RECHECK_MS;
+  if (lockedSig && sigDiff(sig, lockedSig) < limit && !due) return;
 
   const result = await scanOnce({ quiet: true });
   lockedSig = sig;
+  lockedAt = performance.now();
   lockedHit = !!(result && result.answer && result.confidence === 'high');
 }
 
