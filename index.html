@@ -144,9 +144,82 @@
     position:absolute; inset:0; display:none; align-items:center; justify-content:center;
     flex-direction:column; gap:10px; padding:24px; text-align:center; z-index:30; background:#0b0b0f;
   }
+
+  /* ---- Gate overlay: fullscreen "กดคาราวะ" landing screen ---- */
+  #gateOverlay {
+    position:fixed; inset:0; z-index:100; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:20px; padding:36px 20px;
+    text-align:center; overflow-y:auto;
+    background:
+      radial-gradient(circle at 50% 0%, rgba(255,196,0,0.18), transparent 55%),
+      radial-gradient(circle at 15% 85%, rgba(0,255,170,0.12), transparent 50%),
+      linear-gradient(160deg, #0b0b12 0%, #14101f 45%, #1c1230 100%);
+  }
+  #gateOverlay::before {
+    content:''; position:absolute; inset:0; pointer-events:none; opacity:0.5;
+    background-image:
+      linear-gradient(rgba(255,196,0,0.06) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,196,0,0.06) 1px, transparent 1px);
+    background-size:34px 34px;
+    mask-image:radial-gradient(circle at 50% 40%, #000 0%, transparent 70%);
+  }
+  #gateTitle {
+    position:relative; font-size:22px; font-weight:800; letter-spacing:0.5px;
+    background:linear-gradient(90deg, #ffd25c, #ffb347 40%, #ff8a3d);
+    -webkit-background-clip:text; background-clip:text; color:transparent;
+    text-shadow:0 2px 18px rgba(255,170,60,0.25);
+    max-width:420px; line-height:1.4;
+  }
+  #gateImgWrap {
+    position:relative; width:min(78vw, 300px); aspect-ratio:1/1; border-radius:20px;
+    overflow:hidden; border:2px solid rgba(255,196,0,0.55);
+    box-shadow:0 0 0 6px rgba(255,196,0,0.08), 0 12px 40px rgba(0,0,0,0.55);
+    display:flex; align-items:center; justify-content:center;
+    background:linear-gradient(150deg, #241a3a, #3a2350 60%, #542a4a);
+  }
+  #gateImg { width:100%; height:100%; object-fit:cover; display:block; }
+  #gateImgFallback {
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    font-size:15px; color:#ffd88a; padding:14px; font-weight:600; letter-spacing:0.5px;
+  }
+  #gateBowBtn {
+    position:relative; font-family:inherit; font-size:19px; font-weight:800; color:#2a1400;
+    background:linear-gradient(180deg, #ffe08a, #ffb238 55%, #ff8f1f);
+    border:none; border-radius:999px; padding:16px 46px; cursor:pointer;
+    box-shadow:0 8px 0 #b25a00, 0 14px 30px rgba(255,150,0,0.35);
+    letter-spacing:1px; animation:gatePulse 1.6s ease-in-out infinite;
+  }
+  #gateBowBtn:active { transform:translateY(6px); box-shadow:0 2px 0 #b25a00, 0 6px 16px rgba(255,150,0,0.35); }
+  @keyframes gatePulse {
+    0%, 100% { box-shadow:0 8px 0 #b25a00, 0 14px 30px rgba(255,150,0,0.35); }
+    50% { box-shadow:0 8px 0 #b25a00, 0 14px 42px rgba(255,196,80,0.6); }
+  }
+  #gateSubRow {
+    position:relative; display:flex; flex-direction:column; gap:10px;
+    width:min(78vw, 300px); margin-top:6px;
+  }
+  .gateSubBtn {
+    font-family:inherit; font-size:13px; font-weight:600; color:#e7dfff;
+    background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.18);
+    border-radius:14px; padding:12px 16px; cursor:pointer; backdrop-filter:blur(2px);
+  }
+  .gateSubBtn:active { background:rgba(255,255,255,0.14); }
+  #gateHint { position:relative; font-size:11px; color:#8a8298; margin-top:2px; }
+  #gateOverlay.hidden { display:none; }
 </style>
 </head>
 <body>
+
+<!-- Fullscreen gate: must press "กดคาราวะ" before anything else is usable -->
+<div id="gateOverlay">
+  <div id="gateTitle">NuToi No.1 PVP<br>Ragnarok New World Server Lutie</div>
+  <div id="gateImgWrap">
+    
+    <img id="gateImg" src="gate.png" alt="NuToi server" onerror="this.style.display='none'">
+  </div>
+  <button id="gateBowBtn">🙏 กดคาราวะ</button>  
+  <div id="gateHint">กดคาราวะเพื่อเข้าสู่ระบบ</div>
+</div>
 
 <!-- Step 0: choose which quiz set to answer from -->
 <div id="pickerView">

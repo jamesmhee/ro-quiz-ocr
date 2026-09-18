@@ -38,6 +38,8 @@ const els = {
   pickerStatus: document.getElementById('pickerStatus'),
   quizSetBtn: document.getElementById('quizSetBtn'),
   desktopQuizSetBtn: document.getElementById('desktopQuizSetBtn'),
+  gateOverlay: document.getElementById('gateOverlay'),
+  gateBowBtn: document.getElementById('gateBowBtn'),
 };
 
 // ---------- Phase 5/7: Data layer — load questions into memory Map ----------
@@ -919,12 +921,31 @@ document.querySelectorAll('.quizSetBtn').forEach(btn => {
 els.quizSetBtn.addEventListener('click', showPicker);
 els.desktopQuizSetBtn.addEventListener('click', showPicker);
 
+// ---------- Step -1: fullscreen gate, must press "กดคาราวะ" to enter ----------
+// Remembers today's date in localStorage so a player who already bowed today
+// isn't stopped by the gate again until the date rolls over.
+const GATE_STORAGE_KEY = 'nutoi_gate_date';
+function todayStr() {
+  const d = new Date();
+  return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+}
+function enterApp() {
+  els.gateOverlay.classList.add('hidden');
+  showPicker();
+}
+els.gateBowBtn.addEventListener('click', () => {
+  localStorage.setItem(GATE_STORAGE_KEY, todayStr());
+  enterApp();
+});
+
 // ---------- Boot ----------
 (function init() {
   renderQuizSetLabel();
-  showPicker();
   const remembered = localStorage.getItem(QUIZ_SET_STORAGE_KEY);
   if (remembered && QUIZ_SETS[remembered]) {
     els.pickerStatus.textContent = `เลือกล่าสุด: ${QUIZ_SETS[remembered].name}`;
+  }
+  if (localStorage.getItem(GATE_STORAGE_KEY) === todayStr()) {
+    enterApp();
   }
 })();
