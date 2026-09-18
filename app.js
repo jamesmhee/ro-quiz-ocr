@@ -7,8 +7,6 @@
 const els = {
   desktopView: document.getElementById('desktopView'),
   mobileView: document.getElementById('mobileView'),
-  qrImg: document.getElementById('qrImg'),
-  desktopUrl: document.getElementById('desktopUrl'),
   screenShareBtn: document.getElementById('screenShareBtn'),
   video: document.getElementById('video'),
   canvas: document.getElementById('captureCanvas'),
@@ -32,6 +30,11 @@ const els = {
   roiSaved: document.getElementById('roiSaved'),
   roiHint: document.getElementById('roiHint'),
   calibrateBtn: document.getElementById('calibrateBtn'),
+  presetBtn: document.getElementById('presetBtn'),
+  presetPanel: document.getElementById('presetPanel'),
+  presetList: document.getElementById('presetList'),
+  presetSaveBtn: document.getElementById('presetSaveBtn'),
+  presetCloseBtn: document.getElementById('presetCloseBtn'),
   sourceToggle: document.getElementById('sourceToggle'),
   sourceNote: document.getElementById('sourceNote'),
   pickerView: document.getElementById('pickerView'),
@@ -125,9 +128,6 @@ function initDeviceView() {
     setSource('camera');
   } else {
     els.desktopView.style.display = 'flex';
-    const url = window.location.href;
-    els.desktopUrl.textContent = url;
-    els.qrImg.src = 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=' + encodeURIComponent(url);
   }
   els.sourceToggle.textContent = 'แหล่งภาพ: กล้อง';
 }
@@ -307,6 +307,92 @@ function renderSavedRoi() {
   els.roiSaved.style.width = `${roi.w * g.drawnW}px`;
   els.roiSaved.style.height = `${roi.h * g.drawnH}px`;
 }
+
+// ---------- ROI presets: up to 5 named crop boxes per source, saved for reuse ----------
+const MAX_PRESETS = 5;
+function presetsKey() {
+  return `quizRoiPresets:${currentSource}`;
+}
+
+function loadPresets() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(presetsKey()));
+    if (Array.isArray(saved)) return saved;
+  } catch (_) { /* ignore malformed value */ }
+  return [];
+}
+
+function savePresets(list) {
+  localStorage.setItem(presetsKey(), JSON.stringify(list));
+}
+
+function renderPresetList() {
+  const presets = loadPresets();
+  els.presetList.innerHTML = presets.length
+    ? presets.map((p, i) => `
+        <div class="presetRow">
+          <button class="presetApplyBtn" data-i="${i}">${p.name}</button>
+          <button class="presetDeleteBtn" data-i="${i}">ลบ</button>
+        </div>
+      `).join('')
+    : '<p class="presetEmpty">ยังไม่มีพรีเซ็ต</p>';
+
+  const full = presets.length >= MAX_PRESETS;
+  els.presetSaveBtn.disabled = full || !roi;
+  els.presetSaveBtn.textContent = full
+    ? `เต็มแล้ว (${MAX_PRESETS}/${MAX_PRESETS})`
+    : `+ บันทึกกรอบปัจจุบัน (${presets.length}/${MAX_PRESETS})`;
+}
+
+function openPresetPanel() {
+  if (continuousMode) setContinuous(false);
+  hideResult();
+  renderPresetList();
+  els.presetPanel.classList.add('show');
+}
+
+function closePresetPanel() {
+  els.presetPanel.classList.remove('show');
+}
+
+function applyPreset(i) {
+  const preset = loadPresets()[i];
+  if (!preset) return;
+  saveRoi(preset.roi);
+  els.statusText.textContent = `ใช้พรีเซ็ต: ${preset.name}`;
+  closePresetPanel();
+}
+
+function deletePreset(i) {
+  const presets = loadPresets();
+  presets.splice(i, 1);
+  savePresets(presets);
+  renderPresetList();
+}
+
+function saveCurrentAsPreset() {
+  if (!roi) {
+    alert('ยังไม่ได้เลือกกรอบคำถาม กรุณาลากกรอบก่อนบันทึกเป็นพรีเซ็ต');
+    return;
+  }
+  const presets = loadPresets();
+  if (presets.length >= MAX_PRESETS) return;
+  const name = (prompt('ตั้งชื่อพรีเซ็ต:', `พรีเซ็ต ${presets.length + 1}`) || '').trim();
+  if (!name) return;
+  presets.push({ name: name.slice(0, 30), roi });
+  savePresets(presets);
+  renderPresetList();
+}
+
+els.presetBtn.addEventListener('click', openPresetPanel);
+els.presetCloseBtn.addEventListener('click', closePresetPanel);
+els.presetSaveBtn.addEventListener('click', saveCurrentAsPreset);
+els.presetList.addEventListener('click', (e) => {
+  const applyBtn = e.target.closest('.presetApplyBtn');
+  if (applyBtn) return applyPreset(Number(applyBtn.dataset.i));
+  const delBtn = e.target.closest('.presetDeleteBtn');
+  if (delBtn) deletePreset(Number(delBtn.dataset.i));
+});
 
 function startCalibration() {
   // Scanning would keep raising the result panel over the drag layer.
@@ -895,6 +981,7 @@ function showPicker() {
   hideResult();
   hideNote();
   endCalibration();
+  closePresetPanel();
   els.mobileView.style.display = 'none';
   els.desktopView.style.display = 'none';
   els.permError.style.display = 'none';
