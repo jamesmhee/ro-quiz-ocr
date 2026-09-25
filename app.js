@@ -476,13 +476,12 @@ function roiSource() {
     : { x: 0, y: 0, w: vw, h: vh };
 }
 
-function captureFrame() {
+function captureFrame(canvas = els.canvas) {
   const video = els.video;
   const src = roiSource();
   if (!src) throw new Error('ยังไม่มีภาพจากกล้อง/หน้าจอ');
 
   const scale = roi ? Math.max(1, OCR_TARGET_HEIGHT / src.h) : 1;
-  const canvas = els.canvas;
   canvas.width = Math.round(src.w * scale);
   canvas.height = Math.round(src.h * scale);
 
@@ -598,12 +597,16 @@ const OCR_WORKER_OPTIONS = OCR_MODEL === 'fast'
     }
   : {};
 
+// Two workers: MAIN reads new questions, RECHECK re-reads the current one, so
+// a periodic re-read never makes a new question wait in line.
+const MAIN = 0;
+const RECHECK = 1;
 // Cache the promise, not the worker, so a warm-up and a scan racing each other
 // share one worker instead of loading the language data twice.
-let ocrWorkerPromise = null;
-function getOcrWorker() {
-  if (!ocrWorkerPromise) {
-    ocrWorkerPromise = (async () => {
+const ocrWorkerPromises = [null, null];
+function getOcrWorker(slot = MAIN) {
+  if (!ocrWorkerPromises[slot]) {
+    const promise = (async () => {
       const worker = await Tesseract.createWorker('tha+eng', 1, OCR_WORKER_OPTIONS);
       await worker.setParameters({
         // ROI is a single question line, so treat it as one block of text
@@ -612,31 +615,37 @@ function getOcrWorker() {
       });
       return worker;
     })();
-    ocrWorkerPromise.catch(() => { ocrWorkerPromise = null; });
+    ocrWorkerPromises[slot] = promise;
+    promise.catch(() => { ocrWorkerPromises[slot] = null; });
   }
-  return ocrWorkerPromise;
+  return ocrWorkerPromises[slot];
+}
+
+function warmUpWorker(slot) {
+  return getOcrWorker(slot).then(worker => {
+    const c = document.createElement('canvas');
+    c.width = 64; c.height = 32;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, c.width, c.height);
+    return worker.recognize(c);
+  });
 }
 
 // Loading the language data and the first recognize() are the slowest calls
 // Tesseract makes; pay for them while the player is still setting up.
+// RECHECK starts after MAIN so the language data downloads only once.
 function warmUpOcr() {
-  getOcrWorker()
-    .then(worker => {
-      const c = document.createElement('canvas');
-      c.width = 64; c.height = 32;
-      const ctx = c.getContext('2d');
-      ctx.fillStyle = '#fff';
-      ctx.fillRect(0, 0, c.width, c.height);
-      return worker.recognize(c);
-    })
+  warmUpWorker(MAIN)
+    .then(() => warmUpWorker(RECHECK))
     .catch(() => { /* a real scan will surface the error */ });
 }
 
 // Only text + line layout are used; skipping hOCR/TSV generation saves time per scan.
 const OCR_OUTPUT = { text: true, blocks: true, hocr: false, tsv: false };
 
-async function runOcr(canvas) {
-  const worker = await getOcrWorker();
+async function runOcr(canvas, slot = MAIN) {
+  const worker = await getOcrWorker(slot);
   const { data } = await worker.recognize(canvas, {}, OCR_OUTPUT);
   return data; // { text, lines: [...], words: [...] }
 }
@@ -722,6 +731,7 @@ let busy = false;
 async function scanOnce({ quiet = false } = {}) {
   if (busy) return null;
   busy = true;
+  scanGen++;
   els.captureBtn.classList.add('busy');
   els.statusText.textContent = 'กำลังสแกน...';
   if (!quiet) showLoading();
@@ -734,7 +744,7 @@ async function scanOnce({ quiet = false } = {}) {
     const cacheSig = sampleRoi(cacheCtx, CACHE_W, CACHE_H);
     // A manual press always does a fresh OCR, so a wrong remembered answer
     // can be corrected by tapping the capture button.
-    const hit = quiet && cacheSig ? nearestCacheEntry(cacheSig) : null;
+    const hit = ANSWER_MEMORY_ENABLED && quiet && cacheSig ? nearestCacheEntry(cacheSig) : null;
     if (hit) {
       fromCache = true;
       result = { answer: hit.answer, confidence: 'high', matchedQuestion: hit.question };
@@ -747,7 +757,7 @@ async function scanOnce({ quiet = false } = {}) {
       if (!quiet || result.answer) {
         showResult({ ...result, rawText: ocrData.text.trim() });
       }
-      if (cacheSig && result.answer && result.confidence === 'high') {
+      if (ANSWER_MEMORY_ENABLED && cacheSig && result.answer && result.confidence === 'high') {
         cacheStore(cacheSig, result);
       }
     }
@@ -767,6 +777,30 @@ async function scanOnce({ quiet = false } = {}) {
   return result;
 }
 
+// Bumped by every MAIN scan and mode switch; a recheck that started before the
+// bump read a question that is no longer current, so its result is dropped.
+let scanGen = 0;
+let rechecking = false;
+const recheckCanvas = document.createElement('canvas');
+
+// Silent re-read of the current question on the RECHECK worker.
+async function recheckOnce() {
+  rechecking = true;
+  const gen = scanGen;
+  try {
+    const canvas = preprocess(captureFrame(recheckCanvas));
+    const ocrData = await runOcr(canvas, RECHECK);
+    if (gen !== scanGen) return null;
+    const result = matchAnswer(extractQuestion(ocrData));
+    if (result.answer) showResult({ ...result, rawText: ocrData.text.trim() });
+    return result;
+  } catch (_) {
+    return null;
+  } finally {
+    rechecking = false;
+  }
+}
+
 // ---------- Continuous mode: watch the ROI, OCR only when the question changes ----------
 // OCR costs ~0.5-1.5s; comparing a tiny grayscale thumbnail of the ROI costs
 // well under 1ms. So sample often, and run OCR only once the box shows
@@ -781,7 +815,7 @@ const SIG_H = 16;
 const CHANGE_THRESHOLD = 0.004; // this much of the box changed = different question
 const STABLE_THRESHOLD = 0.004; // less than this between samples = frame has settled
 // Safety net: even when nothing seems to change, re-check a locked question
-// this often. Same question = instant answer-memory hit, so it costs ~nothing.
+// this often. Runs on the RECHECK worker, so it never delays a new question.
 const RECHECK_MS = 1500;
 
 const sigCanvas = document.createElement('canvas');
@@ -820,6 +854,9 @@ const CACHE_W = 128;
 const CACHE_H = 20;
 const CACHE_HIT_THRESHOLD = 0.01; // changed-pixel share; a different question lands far above this
 const CACHE_MAX = 200;         // ~3.4KB each in localStorage
+// Disabled: some users see delay from this. Scan runs OCR fresh every time
+// and nothing gets written to localStorage until re-enabled.
+const ANSWER_MEMORY_ENABLED = false;
 
 const cacheCanvas = document.createElement('canvas');
 cacheCanvas.width = CACHE_W;
@@ -903,8 +940,14 @@ function sigDiff(a, b) {
   return changed / a.length;
 }
 
+function lockOn(sig, result) {
+  lockedSig = sig;
+  lockedAt = performance.now();
+  lockedHit = !!(result && result.answer && result.confidence === 'high');
+}
+
 async function watchTick() {
-  if (!continuousMode || busy) return;
+  if (!continuousMode) return;
   const sig = frameSignature();
   if (!sig) return;
   const settling = sigDiff(sig, prevSig) > STABLE_THRESHOLD;
@@ -914,13 +957,19 @@ async function watchTick() {
   // A confident answer holds until the question clearly changes; a miss is
   // retried on any visible change (camera moved, text finished fading in).
   const limit = lockedHit ? CHANGE_THRESHOLD : STABLE_THRESHOLD;
-  const due = performance.now() - lockedAt > RECHECK_MS;
-  if (lockedSig && sigDiff(sig, lockedSig) < limit && !due) return;
+  const changed = !lockedSig || sigDiff(sig, lockedSig) >= limit;
 
-  const result = await scanOnce({ quiet: true });
-  lockedSig = sig;
-  lockedAt = performance.now();
-  lockedHit = !!(result && result.answer && result.confidence === 'high');
+  if (changed) {
+    // MAIN is never held up by a recheck; it runs alongside and supersedes it.
+    if (busy) return;
+    const result = await scanOnce({ quiet: true });
+    lockOn(sig, result);
+  } else if (performance.now() - lockedAt > RECHECK_MS) {
+    if (busy || rechecking) return;
+    const gen = scanGen;
+    const result = await recheckOnce();
+    if (gen === scanGen) lockOn(sig, result);
+  }
 }
 
 function setContinuous(on) {
@@ -930,6 +979,7 @@ function setContinuous(on) {
   // The result panel covers the toggle, so it carries its own stop button.
   els.stopScanBtn.classList.toggle('show', on);
   clearInterval(continuousTimer);
+  scanGen++;
   prevSig = lockedSig = null;
   lockedHit = false;
   if (on) {
