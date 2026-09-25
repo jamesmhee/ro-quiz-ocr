@@ -802,30 +802,28 @@ async function recheckOnce() {
 }
 
 // ---------- Continuous mode: watch the ROI, OCR only when the question changes ----------
-// OCR costs ~0.5-1.5s; comparing a tiny grayscale thumbnail of the ROI costs
-// well under 1ms. So sample often, and run OCR only once the box shows
-// something new and has stopped animating. After a confident answer the
-// question is locked and never re-scanned until the box changes again.
+// OCR costs ~0.1-1.5s; comparing a grayscale sample of the ROI costs about
+// 1ms. So sample often, and run OCR only once the box shows something new and
+// has stopped animating. After an answer the question is locked and only
+// re-scanned when the box changes again (or by the periodic recheck).
 const WATCH_INTERVAL_MS = 100;
-const SIG_W = 64;
-const SIG_H = 16;
-// Thresholds are the share of thumbnail pixels that changed noticeably. A mean
-// diff can't be used: a new question in the same box changes only the thin
-// text strokes, which averages out to almost nothing against the background.
-const CHANGE_THRESHOLD = 0.004; // this much of the box changed = different question
-const STABLE_THRESHOLD = 0.004; // less than this between samples = frame has settled
+// Questions like "MVP ของพื้นที่ Payon คือ" / "... Morroc คือ" differ by one
+// word, so the sample must keep glyphs legible even for a wide box: scale the
+// long side down to at most this, instead of a fixed tiny thumbnail.
+const SIG_MAX = 640;
+// Count of noticeably changed pixels, not a share of the box: a share shrinks
+// as the box grows, so a one-word change in a wide box used to go unseen.
+// Screen-share noise measured at 0 changed pixels; one changed word is 10+.
+const CHANGE_MIN_PIXELS = 8;
 // Safety net: even when nothing seems to change, re-check a locked question
 // this often. Runs on the RECHECK worker, so it never delays a new question.
 const RECHECK_MS = 1500;
 
 const sigCanvas = document.createElement('canvas');
-sigCanvas.width = SIG_W;
-sigCanvas.height = SIG_H;
 const sigCtx = sigCanvas.getContext('2d', { willReadFrequently: true });
 
 let prevSig = null;    // previous sample, to detect when a transition settles
 let lockedSig = null;  // sample the last OCR ran on
-let lockedHit = false; // whether that OCR produced a confident answer
 let lockedAt = 0;      // when that OCR ran
 
 // Grayscale thumbnail of the ROI at w×h, as one byte per pixel.
@@ -842,7 +840,16 @@ function sampleRoi(ctx, w, h) {
 }
 
 function frameSignature() {
-  return sampleRoi(sigCtx, SIG_W, SIG_H);
+  const src = roiSource();
+  if (!src) return null;
+  const s = Math.min(1, SIG_MAX / Math.max(src.w, src.h));
+  const w = Math.max(1, Math.round(src.w * s));
+  const h = Math.max(1, Math.round(src.h * s));
+  if (sigCanvas.width !== w || sigCanvas.height !== h) {
+    sigCanvas.width = w;
+    sigCanvas.height = h;
+  }
+  return sampleRoi(sigCtx, w, h);
 }
 
 // ---------- Answer memory: skip OCR for questions seen before ----------
@@ -927,48 +934,48 @@ function cacheStore(sig, { answer, matchedQuestion }) {
   persistAnswerCache();
 }
 
-// Share of pixels (0..1) whose gray level moved more than PIXEL_DELTA —
-// big enough to ignore video-compression shimmer, small enough to see text.
+// Pixels whose gray level moved more than PIXEL_DELTA — big enough to ignore
+// video-compression shimmer, small enough to see text.
 const PIXEL_DELTA = 30;
 
-function sigDiff(a, b) {
-  if (!a || !b || a.length !== b.length) return 1;
+function changedPixels(a, b) {
+  if (!a || !b || a.length !== b.length) return Infinity;
   let changed = 0;
   for (let i = 0; i < a.length; i++) {
     if (Math.abs(a[i] - b[i]) > PIXEL_DELTA) changed++;
   }
-  return changed / a.length;
+  return changed;
 }
 
-function lockOn(sig, result) {
+function sigDiff(a, b) {
+  return Math.min(1, changedPixels(a, b) / a.length);
+}
+
+function lockOn(sig) {
   lockedSig = sig;
   lockedAt = performance.now();
-  lockedHit = !!(result && result.answer && result.confidence === 'high');
 }
 
 async function watchTick() {
   if (!continuousMode) return;
   const sig = frameSignature();
   if (!sig) return;
-  const settling = sigDiff(sig, prevSig) > STABLE_THRESHOLD;
+  const settling = changedPixels(sig, prevSig) >= CHANGE_MIN_PIXELS;
   prevSig = sig;
   if (settling) return; // mid-animation: OCR would read half-drawn text
 
-  // A confident answer holds until the question clearly changes; a miss is
-  // retried on any visible change (camera moved, text finished fading in).
-  const limit = lockedHit ? CHANGE_THRESHOLD : STABLE_THRESHOLD;
-  const changed = !lockedSig || sigDiff(sig, lockedSig) >= limit;
+  const changed = changedPixels(sig, lockedSig) >= CHANGE_MIN_PIXELS;
 
   if (changed) {
     // MAIN is never held up by a recheck; it runs alongside and supersedes it.
     if (busy) return;
-    const result = await scanOnce({ quiet: true });
-    lockOn(sig, result);
+    await scanOnce({ quiet: true });
+    lockOn(sig);
   } else if (performance.now() - lockedAt > RECHECK_MS) {
     if (busy || rechecking) return;
     const gen = scanGen;
-    const result = await recheckOnce();
-    if (gen === scanGen) lockOn(sig, result);
+    await recheckOnce();
+    if (gen === scanGen) lockOn(sig);
   }
 }
 
@@ -981,7 +988,6 @@ function setContinuous(on) {
   clearInterval(continuousTimer);
   scanGen++;
   prevSig = lockedSig = null;
-  lockedHit = false;
   if (on) {
     continuousTimer = setInterval(watchTick, WATCH_INTERVAL_MS);
     els.statusText.textContent = 'กำลังเฝ้าดูกรอบคำถาม...';
